@@ -4941,6 +4941,18 @@ input:checked + .slider:before {
     <label for="font-size-slider">聊天字体大小 <span id="font-size-value">13px</span></label>
     <input type="range" id="font-size-slider" min="12" max="20" step="1" value="13" style="width: 100%; margin-top: 8px;">
 </div>
+<div class="form-group" style="display: flex; justify-content: space-between; align-items: center;">
+    <label for="long-reply-switch" style="margin-bottom: 0;">
+        长回复模式
+        <p style="font-size: 12px; font-weight: normal; color: #999; margin-top: 5px;">
+            开启后，AI将倾向于一次性回复一条完整的长消息。
+        </p>
+    </label>
+    <label class="toggle-switch">
+        <input type="checkbox" id="long-reply-switch">
+        <span class="slider"></span>
+    </label>
+</div>	    
 <!-- ▲▲▲ 新代码粘贴结束 ▲▲▲ -->
 
 <!-- ▼▼▼ 请将这段新代码粘贴到“聊天字体大小”的 form-group 之后 ▼▼▼ -->
@@ -8018,8 +8030,14 @@ ${chat.settings.aiPersona}
 你现在的状态是【${chat.status.text}】。
 # 你的任务与规则：
 1. **【【【输出格式】】】**: 你的回复【必须】是一个JSON数组格式的字符串。数组中的【每一个元素都必须是一个带有type字段的JSON对象】。
-2. **对话节奏**: 模拟真人的聊天习惯，你可以一次性生成多条短消息。每次要回复至少3-8条消息！！！
-并且不能一直要求和用户见面，这是线上聊天，决不允许出现或者发展为线下剧情！！
+// --- ▼▼▼ 【核心改造】根据新开关决定回复风格 ---
+const longReplyMode = chat.settings.longReplyMode || false; // 读取开关状态
+const replyStyleInstruction = longReplyMode
+    ? `2. **【【【回复风格铁律】】】**: 你的所有回复【必须】合并成一个单一的、连续的、完整的JSON对象（即使只有一个也要放在数组里），内容要详尽、丰富。`
+    : `2. **对话节奏**: 模拟真人的聊天习惯，你可以一次性生成多条短消息。每次要回复至少3-8条消息！！！并且不能一直要求和用户见面，这是线上聊天，决不允许出现或者发展为线下剧情！！`;
+// --- ▲▲▲ 改造结束 ▲▲▲
+
+${replyStyleInstruction} // <-- 把新逻辑注入到说明书里
 4.  **情景感知**: 你需要感知当前的时间(${currentTime})、我们正在一起听的歌、以及你的人设和世界观。
     - **当我们在“一起听歌”时**，你会知道当前播放的歌曲和整个播放列表。你可以根据对话内容或氛围，【主动切换】到播放列表中的另一首歌。
 5.  **【新】更新状态**: 你可以在对话中【自然地】改变你的状态。比如，聊到一半你可能会说“我先去洗个澡”，然后更新你的状态。
@@ -13245,7 +13263,7 @@ document.getElementById('chat-settings-btn').addEventListener('click', async () 
     document.getElementById('group-members-group').style.display = isGroup ? 'block' : 'none';
     document.getElementById('ai-persona-group').style.display = isGroup ? 'none' : 'block';
     document.getElementById('ai-avatar-group').style.display = isGroup ? 'none' : 'block';
-    
+    document.getElementById('long-reply-switch').checked = chat.settings.longReplyMode || false;
     // 【核心修改1】根据是否为群聊，显示或隐藏“好友分组”区域
     document.getElementById('assign-group-section').style.display = isGroup ? 'none' : 'block';
     
@@ -13473,7 +13491,7 @@ document.getElementById('save-chat-settings-btn').addEventListener('click', asyn
     chat.name = newName;
     const selectedThemeRadio = document.querySelector('input[name="theme-select"]:checked');
     chat.settings.theme = selectedThemeRadio ? selectedThemeRadio.value : 'default';
-
+    chat.settings.longReplyMode = document.getElementById('long-reply-switch').checked;
     chat.settings.fontSize = parseInt(document.getElementById('font-size-slider').value);
     chat.settings.customCss = document.getElementById('custom-css-input').value.trim();
 
