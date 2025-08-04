@@ -5645,7 +5645,85 @@ if(Array.isArray(res) && res.length > 1) {
         return [{text:res}]
     }
 
-    function toGeminiRequestData(model, apiKey, systemInstruction, messagesForDecision,isGemini) {
+   /**
+ * 【全新】这是专门为 Anthropic Claude API 准备的“翻译官”函数
+ */
+function toClaudeRequestData(apiKey, systemInstruction, messages) {
+    // 1. Claude 的 system prompt (系统指令) 是一个独立的参数
+    const systemPrompt = systemInstruction;
+
+    // 2. 转换消息格式，特别是处理图片
+    const claudeMessages = messages.map(msg => {
+        let content;
+        // 【核心】处理包含图片的消息
+        if (Array.isArray(msg.content) && msg.content.some(part => part.type === 'image_url')) {
+            content = msg.content.map(part => {
+                if (part.type === 'image_url' && part.image_url.url.startsWith('data:image')) {
+                    const base64Data = part.image_url.url.split(',')[1];
+                    const mimeType = part.image_url.url.match(/^data:(.*);base64/)[1];
+                    // 返回 Claude 能识别的图片格式
+                    return {
+                        type: "image",
+                        source: {
+                            type: "base64",
+                            media_type: mimeType,
+                            data: base64Data,
+                        },
+                    };
+                }
+                // 返回文字部分
+                return { type: "text", text: part.text || '' };
+            });
+        } else {
+            // 处理纯文本消息
+            content = String(msg.content);
+        }
+
+        return {
+            role: msg.role === 'system' ? 'user' : msg.role, // Claude 没有 system 角色，统一转为 user
+            content: content
+        };
+    }).filter(msg => msg.role !== 'assistant' || (typeof msg.content === 'string' && msg.content.trim() !== '')); // 过滤掉空的 assistant 消息
+
+    // Claude 要求 user 和 assistant 角色必须交替出现
+    const finalMessages = [];
+    let lastRole = null;
+    for(const msg of claudeMessages) {
+        if (msg.role !== lastRole) {
+            finalMessages.push(msg);
+            lastRole = msg.role;
+        } else {
+             // 如果角色重复，合并内容 (简单处理)
+            const lastMessage = finalMessages[finalMessages.length - 1];
+            if(typeof lastMessage.content === 'string' && typeof msg.content === 'string') {
+                 lastMessage.content += `\n${msg.content}`;
+            } else {
+                 finalMessages.push(msg); // 无法合并的复杂内容，直接推入
+            }
+        }
+    }
+
+
+    // 3. 返回 Claude API 需要的所有东西
+    return {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey, // Claude 使用 'x-api-key'
+            'anthropic-version': '2023-06-01' // 必须的版本头
+        },
+        body: JSON.stringify({
+            model: "claude-3-5-sonnet-20240620", // 你可以换成其他 Claude 模型
+            system: systemPrompt,
+            messages: finalMessages,
+            max_tokens: 4096, // Claude 需要明确指定最大 token 数
+            temperature: 0.8
+        })
+    };
+}
+	
+	
+	function toGeminiRequestData(model, apiKey, systemInstruction, messagesForDecision,isGemini) {
 
 	if(!isGemini){
 		return undefined
@@ -8144,36 +8222,56 @@ if (visiblePosts.length > 0 && !chat.isGroup) {
             }
             messagesPayload.push({ role: 'system', content: postsContext });
         }
-            let  isGemini = proxyUrl === GEMINI_API_URL;
-            let geminiConfig = toGeminiRequestData(model,apiKey,systemPrompt, messagesPayload,isGemini)
-            const response = isGemini ? await fetch(geminiConfig.url, geminiConfig.data) :  await fetch(`${proxyUrl}/v1/chat/completions`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`},
-                body: JSON.stringify({
-                    model: model,
-                    messages: [{role: 'system', content: systemPrompt}, ...messagesPayload],
-                    temperature: 0.8,
-                    stream: false
-                })
-            });
-            if (!response.ok) {
-                let errorMsg = `API Error: ${response.status}`;
-                try {
-                    // 尝试解析错误信息体为JSON
-                    const errorData = await response.json();
-                    // 安全地获取错误信息，如果结构不符合预期，就将整个错误对象转为字符串
-                    errorMsg += ` - ${errorData?.error?.message || JSON.stringify(errorData)}`;
-                } catch (jsonError) {
-                    // 如果连JSON都不是，就直接读取文本
-                    errorMsg += ` - ${await response.text()}`;
-                }
-                // 抛出一个包含了详细信息的错误，这样就不会在catch块里再次出错了
-                throw new Error(errorMsg);
-            }
-            const data = await response.json();
-            const aiResponseContent = isGemini? data.candidates[0].content.parts[0].text : data.choices[0].message.content;
-            console.log(`AI '${chat.name}' 的原始回复:`, aiResponseContent);
+           let response;
+            let data;
+            let aiResponseContent;
 
+            // --- 核心改造：在这里判断该用哪个 API ---
+            
+            // 判断1：如果用的是 Claude API
+            if (proxyUrl.includes('anthropic.com')) { 
+                console.log("检测到 Claude API，正在使用 Claude 格式...");
+                const claudePayload = toClaudeRequestData(apiKey, systemPrompt, messagesPayload);
+                response = await fetch(proxyUrl, claudePayload);
+                if (!response.ok) { // Claude 的错误处理
+                    const errorData = await response.json();
+                    throw new Error(`Claude API Error: ${errorData.error.message}`);
+                }
+                data = await response.json();
+                aiResponseContent = data.content[0].text;
+
+            // 判断2：如果用的是 Gemini API
+            } else if (proxyUrl === GEMINI_API_URL) {
+                console.log("检测到 Gemini API，正在使用 Gemini 格式...");
+                const geminiConfig = toGeminiRequestData(model, apiKey, systemPrompt, messagesPayload, true);
+                response = await fetch(geminiConfig.url, geminiConfig.data);
+                 if (!response.ok) { // Gemini 的错误处理
+                    const errorData = await response.json();
+                    throw new Error(`Gemini API Error: ${errorData.error.message}`);
+                }
+                data = await response.json();
+                aiResponseContent = data.candidates[0].content.parts[0].text;
+
+            // 判断3：否则，默认使用 OpenAI 格式
+            } else {
+                console.log("未识别特定 API，默认使用 OpenAI 格式...");
+                response = await fetch(`${proxyUrl}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}`},
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [{role: 'system', content: systemPrompt}, ...messagesPayload],
+                        temperature: 0.8,
+                        stream: false
+                    })
+                });
+                if (!response.ok) { // OpenAI 的错误处理
+                    const errorData = await response.json();
+                    throw new Error(`OpenAI API Error: ${errorData.error.message}`);
+                }
+                data = await response.json();
+                aiResponseContent = data.choices[0].message.content;
+            }
         chat.history = chat.history.filter(msg => !msg.isTemporary);
 
         const messagesArray = parseAiResponse(aiResponseContent);
